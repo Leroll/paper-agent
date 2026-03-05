@@ -1,11 +1,10 @@
 import os
 import re
 from typing import TypedDict
-from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 from langchain_community.document_loaders import ArxivLoader
 
-# 加载环境变量
+from dotenv import load_dotenv
 load_dotenv()
 
 # ================================
