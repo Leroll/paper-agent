@@ -18,6 +18,7 @@ dependencies = [
     "httpx[socks]>=0.28.1",
     "ipython>=8.39.0",
     "requests>=2.32.5",
+    "google-genai>=1.0.0",
 ]
 
 [tool.uv]
