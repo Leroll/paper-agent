@@ -20,7 +20,6 @@ model = init_chat_model(
 )
 
 
-
 # ================================
 # 1. 定义状态 (State)
 # ================================
@@ -32,6 +31,7 @@ class PaperState(TypedDict):
     draft: str            # 撰稿人写的初稿
     final_article: str    # 终稿
     revision_count: int   # 修改或打回次数
+    token_usage: dict     # Token 消耗统计
 
 # ================================
 # 2. 定义节点 (Nodes)
@@ -47,16 +47,21 @@ def parser_node(state: PaperState):
         return {"pdf_path": "未找到有效的 Arxiv ID"}
         
     arxiv_id = match.group(1)
-    print(f"📄 提取到 Arxiv ID: {arxiv_id}，正在下载 PDF 全文...")
+    print(f"📄 提取到 Arxiv ID: {arxiv_id}，准备获取 PDF 全文...")
     
     try:
-        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-        response = requests.get(pdf_url, stream=True)
-        response.raise_for_status()
-        
         output_dir = os.path.join("outputs", arxiv_id)
         os.makedirs(output_dir, exist_ok=True)
         pdf_path = os.path.join(output_dir, f"{arxiv_id}.pdf")
+        
+        if os.path.exists(pdf_path):
+            print(f"✅ 发现已下载的论文 PDF，跳过下载: {pdf_path}")
+            return {"pdf_path": pdf_path}
+            
+        print(f"⬇️ 正在下载 PDF 全文...")
+        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+        response = requests.get(pdf_url, stream=True)
+        response.raise_for_status()
         
         with open(pdf_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
@@ -67,6 +72,7 @@ def parser_node(state: PaperState):
     except Exception as e:
         print(f"❌ 下载论文出现错误: {e}")
         return {"pdf_path": f"下载错误: {e}"}
+    
 
 def researcher_node(state: PaperState):
     print("🔬 [2/5] 研究员正在提炼核心内容...")
@@ -106,13 +112,23 @@ def researcher_node(state: PaperState):
 
         response = model.invoke([message])
         
+        # 获取 token 使用情况
+        token_usage = state.get("token_usage", {})
+        usage = getattr(response, "usage_metadata", {}) or getattr(response, "response_metadata", {}).get("token_usage", {})
+        if usage:
+            token_usage["Researcher"] = {
+                "input_tokens": usage.get("input_tokens", 0) or usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0) or usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0)
+            }
+        
         # 兼容文本或包含块的返回格式
         if isinstance(response.content, list):
             result = "\n".join([block.get("text") for block in response.content if isinstance(block, dict) and block.get("text")])
         else:
             result = response.content
             
-        return {"extracted_info": result}
+        return {"extracted_info": result, "token_usage": token_usage}
     except Exception as e:
         print(f"❌ 研究员提炼核心内容失败: {e}")
         return {"extracted_info": f"请求大模型时发生错误: {e}"}
@@ -180,7 +196,7 @@ app = workflow.compile()
 # ================================
 if __name__ == "__main__":
     print("====== 启动论文分析 Agent... ======")
-    test_arxiv_url = "https://arxiv.org/abs/2301.02111" # 测试用 URL: VALL-E
+    test_arxiv_url = "https://arxiv.org/abs/2411.09943" # 测试用 URL: VALL-E
     initial_state = {
         "arxiv_url": test_arxiv_url,
         "pdf_path": "",
@@ -188,7 +204,8 @@ if __name__ == "__main__":
         "outline": "",
         "draft": "",
         "final_article": "",
-        "revision_count": 0
+        "revision_count": 0,
+        "token_usage": {}
     }
     
     # 执行图
@@ -196,6 +213,33 @@ if __name__ == "__main__":
     print("\n====== 最终产出摘要: ======")
     extracted_info = result.get("extracted_info", "")
     print(extracted_info)
+    
+    # 获取并打印 Token 统计
+    token_usage = result.get("token_usage", {})
+    token_summary = "\n\n---\n## 📊 Token 消耗统计\n\n"
+    if token_usage:
+        token_summary += "| 节点 | 输入 Tokens | 输出 Tokens | 总计 Tokens |\n"
+        token_summary += "|---|---|---|---|\n"
+        total_in = total_out = total = 0
+        for node, usage in token_usage.items():
+            in_t = usage.get("input_tokens", 0)
+            out_t = usage.get("output_tokens", 0)
+            tot_t = usage.get("total_tokens", 0)
+            if not tot_t:
+                tot_t = in_t + out_t
+            total_in += in_t
+            total_out += out_t
+            total += tot_t
+            token_summary += f"| {node} | {in_t} | {out_t} | {tot_t} |\n"
+        token_summary += f"| **总计** | **{total_in}** | **{total_out}** | **{total}** |\n"
+    else:
+        token_summary += "暂无 Token 消耗数据。\n"
+        
+    print(token_summary)
+    
+    # 将统计数据追加到输出内容中进行持久化保存
+    if extracted_info:
+        extracted_info += token_summary
     
     # 保存结果到 outputs 文件夹
     match = re.search(r'(\d{4}\.\d{4,5})', test_arxiv_url)
